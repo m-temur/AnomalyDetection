@@ -1,200 +1,238 @@
-I'll implement the performance package focusing on optimization, making sure all references are resolved.
+I'll provide the complete capture package files based on the original structure:
 
 ```kotlin
-// performance/PerformanceMonitor.kt
-class PerformanceMonitor @Inject constructor() {
-    private val metrics = mutableMapOf<String, MetricStats>()
-    private val mutex = Mutex()
+// capture/CameraManager.kt
+class CameraManager @Inject constructor(
+    private val context: Context,
+    private val lifecycleOwner: LifecycleOwner
+) {
+    private var camera: Camera? = null
+    private var imageCapture: ImageCapture? = null
+    private var imageAnalysis: ImageAnalysis? = null
+    private var preview: Preview? = null
+    private var cameraProvider: ProcessCameraProvider? = null
 
-    suspend fun recordMetric(name: String, value: Long, type: MetricType) = mutex.withLock {
-        metrics.getOrPut(name) { MetricStats() }.apply {
-            addMeasurement(value)
+    private val mainExecutor = ContextCompat.getMainExecutor(context)
+    private val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+
+    suspend fun initializeCamera(
+        previewView: PreviewView,
+        detectionMode: DetectionMode,
+        captureMode: CaptureMode,
+        imageAnalyzer: ImageAnalysis.Analyzer
+    ) {
+        cameraProvider = ProcessCameraProvider.getInstance(context).await()
+        
+        setupUseCases(
+            previewView,
+            detectionMode,
+            captureMode,
+            imageAnalyzer
+        )
+
+        try {
+            cameraProvider?.unbindAll()
+            camera = cameraProvider?.bindToLifecycle(
+                lifecycleOwner,
+                cameraSelector,
+                preview,
+                imageCapture,
+                imageAnalysis
+            )
+        } catch (e: Exception) {
+            throw CameraException("Failed to bind camera use cases", e)
         }
     }
 
-    fun getAverageMetric(name: String): Double = 
-        metrics[name]?.getAverage() ?: 0.0
+    private fun setupUseCases(
+        previewView: PreviewView,
+        detectionMode: DetectionMode,
+        captureMode: CaptureMode,
+        imageAnalyzer: ImageAnalysis.Analyzer
+    ) {
+        val rotation = previewView.display.rotation
+        val aspectRatio = aspectRatio(previewView.width, previewView.height)
 
-    fun reset() = metrics.clear()
-}
-
-// performance/MetricsCollector.kt
-class MetricsCollector @Inject constructor() {
-    private val measurementMap = mutableMapOf<String, MutableList<Long>>()
-    private val mutex = Mutex()
-
-    suspend fun addMeasurement(name: String, value: Long) = mutex.withLock {
-        measurementMap.getOrPut(name) { mutableListOf() }.add(value)
-    }
-
-    fun getAverageMeasurement(name: String): Double {
-        return measurementMap[name]?.average() ?: 0.0
-    }
-
-    fun clear() {
-        measurementMap.clear()
-    }
-
-    fun getStats(name: String): MetricStats? {
-        return measurementMap[name]?.let { measurements ->
-            MetricStats().apply {
-                measurements.forEach { addMeasurement(it) }
+        preview = Preview.Builder()
+            .setTargetAspectRatio(aspectRatio)
+            .setTargetRotation(rotation)
+            .build()
+            .also {
+                it.setSurfaceProvider(previewView.surfaceProvider)
             }
+
+        imageCapture = ImageCapture.Builder()
+            .setCaptureMode(getImageCaptureMode(captureMode))
+            .setTargetAspectRatio(aspectRatio)
+            .setTargetRotation(rotation)
+            .build()
+
+        imageAnalysis = ImageAnalysis.Builder()
+            .setTargetAspectRatio(aspectRatio)
+            .setTargetRotation(rotation)
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+            .build()
+            .also {
+                it.setAnalyzer(
+                    Dispatchers.Default.asExecutor(),
+                    imageAnalyzer
+                )
+            }
+    }
+
+    fun captureImage(
+        file: File,
+        onSuccess: (Uri) -> Unit,
+        onError: (Exception) -> Unit
+    ) {
+        val outputOptions = ImageCapture.OutputFileOptions.Builder(file).build()
+
+        imageCapture?.takePicture(
+            outputOptions,
+            mainExecutor,
+            object : ImageCapture.OnImageSavedCallback {
+                override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                    output.savedUri?.let { onSuccess(it) }
+                }
+
+                override fun onError(exception: ImageCaptureException) {
+                    onError(exception)
+                }
+            }
+        )
+    }
+
+    fun release() {
+        try {
+            cameraProvider?.unbindAll()
+        } catch (e: Exception) {
+            // Handle exception
+        } finally {
+            camera = null
+            imageCapture = null
+            imageAnalysis = null
+            preview = null
+            cameraProvider = null
         }
     }
-}
 
-// performance/InferenceProfiler.kt
-class InferenceProfiler @Inject constructor(
-    private val metricsCollector: MetricsCollector
-) {
-    private var currentStartTime = 0L
-
-    fun startInference() {
-        currentStartTime = System.nanoTime()
-    }
-
-    suspend fun endInference() {
-        val duration = (System.nanoTime() - currentStartTime) / 1_000_000 // Convert to ms
-        metricsCollector.addMeasurement("inference_time", duration)
-    }
-
-    suspend fun recordPreprocessingTime(duration: Long) {
-        metricsCollector.addMeasurement("preprocessing_time", duration)
-    }
-
-    suspend fun recordPostprocessingTime(duration: Long) {
-        metricsCollector.addMeasurement("postprocessing_time", duration)
-    }
-
-    fun getAverageInferenceTime(): Double {
-        return metricsCollector.getAverageMeasurement("inference_time")
-    }
-}
-
-// performance/CacheManager.kt
-class CacheManager @Inject constructor() {
-    private val cache = LruCache<String, ProcessedData>(20)
-    private val mutex = Mutex()
-
-    suspend fun getCachedResult(key: String): ProcessedData? = mutex.withLock {
-        cache.get(key)
-    }
-
-    suspend fun cacheResult(key: String, data: ProcessedData) = mutex.withLock {
-        cache.put(key, data)
-    }
-
-    fun clearCache() {
-        cache.evictAll()
-    }
-
-    private fun generateCacheKey(input: DetectionInput): String {
-        return when (input) {
-            is DetectionInput.FromBitmap -> "${input.bitmap.hashCode()}"
-            is DetectionInput.FromByteArray -> "${input.data.contentHashCode()}"
-            else -> throw IllegalArgumentException("Unsupported input type for caching")
+    private fun aspectRatio(width: Int, height: Int): Int {
+        val previewRatio = max(width, height).toDouble() / min(width, height)
+        return if (abs(previewRatio - RATIO_4_3_VALUE) <= abs(previewRatio - RATIO_16_9_VALUE)) {
+            AspectRatio.RATIO_4_3
+        } else {
+            AspectRatio.RATIO_16_9
         }
     }
+
+    private fun getImageCaptureMode(captureMode: CaptureMode): Int {
+        return when (captureMode) {
+            CaptureMode.OPTIMIZE_QUALITY -> ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
+            CaptureMode.OPTIMIZE_LATENCY -> ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
+        }
+    }
+
+    companion object {
+        private const val RATIO_4_3_VALUE = 4.0 / 3.0
+        private const val RATIO_16_9_VALUE = 16.0 / 9.0
+    }
+
+    class CameraException(message: String, cause: Throwable? = null) : 
+        Exception(message, cause)
 }
 
-// performance/MetricStats.kt
-data class MetricStats(
-    var count: Int = 0,
-    var sum: Long = 0,
-    var min: Long = Long.MAX_VALUE,
-    var max: Long = Long.MIN_VALUE
-) {
-    fun addMeasurement(value: Long) {
-        count++
-        sum += value
-        min = min.coerceAtMost(value)
-        max = max.coerceAtLeast(value)
-    }
-
-    fun getAverage(): Double = if (count > 0) sum.toDouble() / count else 0.0
+// capture/CaptureMode.kt
+enum class CaptureMode {
+    OPTIMIZE_QUALITY,
+    OPTIMIZE_LATENCY
 }
 
-// performance/MetricType.kt
-enum class MetricType {
-    PREPROCESSING,
-    INFERENCE,
-    POSTPROCESSING
+// capture/DetectionMode.kt
+enum class DetectionMode {
+    OBJECT_DETECTION {
+        override fun getConfig(): DetectionConfig = DetectionConfig(
+            modelType = ModelType.YOLO,
+            threshold = 0.5f,
+            nmsThreshold = 0.45f,
+            targetSize = Size(640, 640)
+        )
+    },
+    ANOMALY_DETECTION {
+        override fun getConfig(): DetectionConfig = DetectionConfig(
+            modelType = ModelType.PADIM,
+            threshold = 0.5f,
+            targetSize = Size(224, 224)
+        )
+    };
+
+    abstract fun getConfig(): DetectionConfig
 }
 
-// Add to di/PerformanceModule.kt
-@Module
-@InstallIn(SingletonComponent::class)
-object PerformanceModule {
-    @Provides
-    @Singleton
-    fun providePerformanceMonitor(): PerformanceMonitor {
-        return PerformanceMonitor()
-    }
+// Internal helper classes
+data class DetectionConfig(
+    val modelType: ModelType,
+    val threshold: Float,
+    val nmsThreshold: Float = 0.0f,
+    val targetSize: Size
+)
 
-    @Provides
-    @Singleton
-    fun provideMetricsCollector(): MetricsCollector {
-        return MetricsCollector()
-    }
-
-    @Provides
-    @Singleton
-    fun provideInferenceProfiler(
-        metricsCollector: MetricsCollector
-    ): InferenceProfiler {
-        return InferenceProfiler(metricsCollector)
-    }
-
-    @Provides
-    @Singleton
-    fun provideCacheManager(): CacheManager {
-        return CacheManager()
-    }
+enum class ModelType {
+    YOLO,
+    MOBILENET,
+    PADIM,
+    PATCHCORE
 }
 
 ```
 
 Required imports:
 ```kotlin
-import android.util.LruCache
-import dagger.Module
-import dagger.Provides
-import dagger.hilt.InstallIn
-import dagger.hilt.components.SingletonComponent
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import android.content.Context
+import android.graphics.ImageFormat
+import android.net.Uri
+import android.util.Size
+import androidx.camera.core.*
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.LifecycleOwner
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asExecutor
+import kotlinx.coroutines.tasks.await
+import java.io.File
+import java.util.concurrent.Executor
 import javax.inject.Inject
-import javax.inject.Singleton
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 ```
 
-To use these performance tools in your detectors:
+To use this in your app:
 
 ```kotlin
-class YourDetector @Inject constructor(
-    private val inferenceProfiler: InferenceProfiler,
-    private val cacheManager: CacheManager
-) {
-    suspend fun detect(input: DetectionInput): DetectionResult {
-        // Check cache
-        val cacheKey = generateCacheKey(input)
-        cacheManager.getCachedResult(cacheKey)?.let { return it }
+class YourFragment : Fragment() {
+    @Inject lateinit var cameraManager: CameraManager
 
-        // Start profiling
-        inferenceProfiler.startInference()
-        
-        // Your detection logic
-        
-        inferenceProfiler.endInference()
+    private fun setupCamera() {
+        lifecycleScope.launch {
+            cameraManager.initializeCamera(
+                previewView = binding.previewView,
+                detectionMode = DetectionMode.OBJECT_DETECTION,
+                captureMode = CaptureMode.OPTIMIZE_LATENCY,
+                imageAnalyzer = YourImageAnalyzer()
+            )
+        }
     }
 }
 ```
 
-These components provide:
-1. Performance monitoring
-2. Metrics collection
-3. Inference profiling
-4. Result caching
-5. Thread-safe operations
+This implementation provides:
+1. Efficient camera handling
+2. Support for both photo capture and real-time analysis
+3. Configurable detection modes
+4. Performance-optimized image capture
+5. Proper lifecycle management
 
 Let me know if you need any clarification or additional functionality!
