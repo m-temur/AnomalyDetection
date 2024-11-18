@@ -1,108 +1,151 @@
-Here's the ImageProcessor implementation that's needed:
+I'll provide the essential executor files needed:
 
 ```kotlin
-// utils/image/ImageProcessor.kt
-class ImageProcessor @Inject constructor(
-    private val context: Context,
-    private val bitmapPool: BitmapPool
-) {
-    suspend fun loadBitmapFromUri(uri: Uri): Bitmap = withContext(Dispatchers.IO) {
-        context.contentResolver.openInputStream(uri)?.use {
-            BitmapFactory.decodeStream(it)
-        } ?: throw IllegalStateException("Failed to load bitmap from URI")
-    }
+// runtime/base/ModelExecutor.kt
+interface ModelExecutor {
+    fun loadModel(config: ModelConfig)
+    fun unloadModel()
+    suspend fun execute(input: ProcessedData): RawOutput
+    val isInitialized: Boolean
+}
 
-    fun loadBitmapFromByteArray(data: ByteArray): Bitmap {
-        return BitmapFactory.decodeByteArray(data, 0, data.size)
-    }
+// runtime/onnx/OnnxRuntimeWrapper.kt
+class OnnxRuntimeWrapper @Inject constructor(
+    private val context: Context
+) : ModelExecutor {
+    private var session: OrtSession? = null
+    private val environment = OrtEnvironment.getEnvironment()
 
-    fun resizeBitmap(bitmap: Bitmap, targetSize: Size): Bitmap {
-        if (bitmap.width == targetSize.width && bitmap.height == targetSize.height) {
-            return bitmap
-        }
-
-        return Bitmap.createScaledBitmap(
-            bitmap,
-            targetSize.width,
-            targetSize.height,
-            true
-        )
-    }
-
-    fun rotateBitmap(bitmap: Bitmap, rotation: Int): Bitmap {
-        if (rotation == 0) return bitmap
-
-        val matrix = Matrix().apply {
-            postRotate(rotation.toFloat())
-        }
-
-        return Bitmap.createBitmap(
-            bitmap,
-            0,
-            0,
-            bitmap.width,
-            bitmap.height,
-            matrix,
-            true
-        )
-    }
-
-    fun normalizePixel(value: Int, mean: Float = 127.5f, std: Float = 127.5f): Float {
-        return (value - mean) / std
-    }
-
-    fun preprocessForInference(bitmap: Bitmap, config: ProcessingConfig): FloatArray {
-        val pixels = IntArray(bitmap.width * bitmap.height)
-        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+    override fun loadModel(config: ModelConfig) {
+        if (isInitialized) return
         
-        val tensorData = FloatArray(bitmap.width * bitmap.height * 3)
-        for (i in pixels.indices) {
-            val pixel = pixels[i]
-            tensorData[i] = normalizePixel(Color.red(pixel))
-            tensorData[i + pixels.size] = normalizePixel(Color.green(pixel))
-            tensorData[i + 2 * pixels.size] = normalizePixel(Color.blue(pixel))
+        val sessionOptions = OrtSession.SessionOptions().apply {
+            setIntraOpNumThreads(config.deviceConfig.numThreads)
+            setOptimizationLevel(OrtSession.GraphOptimizationLevel.ORT_ENABLE_ALL)
+            
+            if (config.deviceConfig.useGpu) {
+                addGPU()
+            }
         }
-        return tensorData
+
+        val modelBytes = context.assets.open(config.modelPath).use { it.readBytes() }
+        session = environment.createSession(modelBytes, sessionOptions)
     }
 
-    fun convertBitmapToByteBuffer(bitmap: Bitmap, config: ProcessingConfig): ByteBuffer {
-        val byteBuffer = ByteBuffer.allocateDirect(
-            4 * bitmap.width * bitmap.height * 3
-        ).apply {
-            order(ByteOrder.nativeOrder())
+    override fun unloadModel() {
+        session?.close()
+        session = null
+    }
+
+    override suspend fun execute(input: ProcessedData): RawOutput = withContext(Dispatchers.Default) {
+        checkNotNull(session) { "Session not initialized" }
+        
+        val inputTensor = OnnxTensor.createTensor(
+            environment,
+            input.tensorData,
+            input.shape.map { it.toLong() }.toLongArray()
+        )
+
+        val output = session!!.run(mapOf("input" to inputTensor))
+        val outputData = output[0].value as FloatArray
+
+        RawOutput.AnomalyDetection(
+            data = outputData,
+            shape = input.shape
+        )
+    }
+
+    override val isInitialized: Boolean
+        get() = session != null
+}
+
+// runtime/tflite/TensorFlowRunner.kt
+class TensorFlowRunner @Inject constructor(
+    private val context: Context
+) : ModelExecutor {
+    private var interpreter: Interpreter? = null
+    private var gpuDelegate: Delegate? = null
+
+    override fun loadModel(config: ModelConfig) {
+        if (isInitialized) return
+        
+        val options = Interpreter.Options().apply {
+            setNumThreads(config.deviceConfig.numThreads)
+            
+            if (config.deviceConfig.useGpu) {
+                gpuDelegate = GpuDelegate()
+                addDelegate(gpuDelegate)
+            }
         }
 
-        val pixels = IntArray(bitmap.width * bitmap.height)
-        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+        val modelBytes = context.assets.open(config.modelPath).use { it.readBytes() }
+        interpreter = Interpreter(modelBytes, options)
+    }
 
-        pixels.forEach { pixel ->
-            byteBuffer.putFloat(normalizePixel(Color.red(pixel)))
-            byteBuffer.putFloat(normalizePixel(Color.green(pixel)))
-            byteBuffer.putFloat(normalizePixel(Color.blue(pixel)))
+    override fun unloadModel() {
+        interpreter?.close()
+        interpreter = null
+        gpuDelegate?.close()
+        gpuDelegate = null
+    }
+
+    override suspend fun execute(input: ProcessedData): RawOutput = withContext(Dispatchers.Default) {
+        checkNotNull(interpreter) { "Interpreter not initialized" }
+        
+        val outputShape = input.shape
+        val outputData = FloatArray(outputShape.reduce { acc, i -> acc * i })
+        
+        interpreter!!.run(input.tensorData, outputData)
+
+        RawOutput.AnomalyDetection(
+            data = outputData,
+            shape = outputShape
+        )
+    }
+
+    override val isInitialized: Boolean
+        get() = interpreter != null
+}
+
+// runtime/onnx/OnnxUtils.kt
+object OnnxUtils {
+    fun createInputTensor(
+        environment: OrtEnvironment,
+        data: FloatArray,
+        shape: Array<Int>
+    ): OnnxTensor {
+        return OnnxTensor.createTensor(
+            environment,
+            data,
+            shape.map { it.toLong() }.toLongArray()
+        )
+    }
+
+    fun processOutput(output: OrtValue): FloatArray {
+        return when (val value = output.value) {
+            is Array<*> -> value.map { (it as FloatArray)[0] }.toFloatArray()
+            is FloatArray -> value
+            else -> throw IllegalArgumentException("Unsupported output type")
         }
-
-        return byteBuffer
     }
 }
 
-// di/ProcessingModule.kt
-@Module
-@InstallIn(SingletonComponent::class)
-object ProcessingModule {
-    @Provides
-    @Singleton
-    fun provideImageProcessor(
-        @ApplicationContext context: Context,
-        bitmapPool: BitmapPool
-    ): ImageProcessor {
-        return ImageProcessor(context, bitmapPool)
-    }
-    
-    @Provides
-    @Singleton
-    fun provideBitmapPool(): BitmapPool {
-        return BitmapPool()
+// runtime/tflite/TFLiteUtils.kt
+object TFLiteUtils {
+    fun createInputArray(data: FloatArray, shape: Array<Int>): Array<FloatArray> {
+        val size = shape.reduce { acc, i -> acc * i }
+        return Array(1) { data.copyOf(size) }
     }
 }
 
+```
+
+Add these dependencies to your build.gradle:
+
+```gradle
+dependencies {
+    implementation 'org.tensorflow:tensorflow-lite:2.12.0'
+    implementation 'org.tensorflow:tensorflow-lite-gpu:2.12.0'
+    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.14.0'
+}
 ```
