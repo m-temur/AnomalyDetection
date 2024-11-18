@@ -1,244 +1,20 @@
-# AnomalyDetection
-I'll share the complete project structure and guide you through the next implementation steps.
-
-Complete Project Structure:
-```plaintext
-app/
-├── src/
-│   ├── main/
-│   │   ├── java/com/example/aidetection/
-│   │   │   ├── core/
-│   │   │   │   ├── base/
-│   │   │   │   │   ├── BaseModel.kt
-│   │   │   │   │   ├── BaseProcessor.kt
-│   │   │   │   │   └── BaseExecutor.kt
-│   │   │   │   │
-│   │   │   │   ├── data/
-│   │   │   │   │   ├── DetectionInput.kt
-│   │   │   │   │   ├── DetectionResult.kt
-│   │   │   │   │   ├── ProcessedData.kt
-│   │   │   │   │   ├── RawOutput.kt
-│   │   │   │   │   └── ModelConfig.kt
-│   │   │   │   │
-│   │   │   │   └── domain/
-│   │   │   │       ├── DetectedObject.kt
-│   │   │   │       ├── Anomaly.kt
-│   │   │   │       └── ProcessingMetrics.kt
-│   │   │   │
-│   │   │   ├── detection/
-│   │   │   │   ├── object/
-│   │   │   │   │   ├── ObjectDetector.kt
-│   │   │   │   │   ├── models/
-│   │   │   │   │   │   ├── YoloDetector.kt
-│   │   │   │   │   │   └── MobileNetDetector.kt
-│   │   │   │   │   │
-│   │   │   │   │   └── processor/
-│   │   │   │   │       ├── YoloProcessor.kt
-│   │   │   │   │       └── MobileNetProcessor.kt
-│   │   │   │   │
-│   │   │   │   └── anomaly/
-│   │   │   │       ├── AnomalyDetector.kt
-│   │   │   │       ├── models/
-│   │   │   │       │   ├── PadimDetector.kt
-│   │   │   │       │   └── PatchCoreDetector.kt
-│   │   │   │       │
-│   │   │   │       └── processor/
-│   │   │   │           ├── PadimProcessor.kt
-│   │   │   │           └── PatchCoreProcessor.kt
-│   │   │   │
-│   │   │   ├── executor/
-│   │   │   │   ├── base/
-│   │   │   │   │   └── ModelExecutor.kt
-│   │   │   │   │
-│   │   │   │   ├── onnx/
-│   │   │   │   │   ├── OnnxExecutor.kt
-│   │   │   │   │   └── OnnxUtils.kt
-│   │   │   │   │
-│   │   │   │   └── tflite/
-│   │   │   │       ├── TfliteExecutor.kt
-│   │   │   │       └── TfliteUtils.kt
-│   │   │   │
-│   │   │   ├── di/
-│   │   │   │   ├── AppModule.kt
-│   │   │   │   ├── DetectionModule.kt
-│   │   │   │   ├── ExecutorModule.kt
-│   │   │   │   └── ProcessorModule.kt
-│   │   │   │
-│   │   │   ├── utils/
-│   │   │   │   ├── image/
-│   │   │   │   │   ├── BitmapPool.kt
-│   │   │   │   │   ├── ImageProcessor.kt
-│   │   │   │   │   └── ImageUtils.kt
-│   │   │   │   │
-│   │   │   │   ├── performance/
-│   │   │   │   │   ├── PerformanceMonitor.kt
-│   │   │   │   │   └── MetricsCollector.kt
-│   │   │   │   │
-│   │   │   │   └── extensions/
-│   │   │   │       ├── BitmapExt.kt
-│   │   │   │       ├── ContextExt.kt
-│   │   │   │       └── ImageProxyExt.kt
-│   │   │   │
-│   │   │   └── ui/
-│   │   │       ├── main/
-│   │   │       │   ├── MainActivity.kt
-│   │   │       │   └── MainViewModel.kt
-│   │   │       │
-│   │   │       ├── camera/
-│   │   │       │   ├── CameraFragment.kt
-│   │   │       │   └── CameraViewModel.kt
-│   │   │       │
-│   │   │       └── detection/
-│   │   │           ├── DetectionFragment.kt
-│   │   │           └── DetectionViewModel.kt
-│   │   │
-│   │   ├── cpp/
-│   │   │   ├── image_processor/
-│   │   │   │   ├── image_processor.cpp
-│   │   │   │   └── image_processor.h
-│   │   │   │
-│   │   │   └── CMakeLists.txt
-│   │   │
-│   │   ├── res/
-│   │   │   ├── layout/
-│   │   │   │   ├── activity_main.xml
-│   │   │   │   ├── fragment_camera.xml
-│   │   │   │   └── fragment_detection.xml
-│   │   │   │
-│   │   │   ├── values/
-│   │   │   │   ├── strings.xml
-│   │   │   │   ├── colors.xml
-│   │   │   │   └── dimens.xml
-│   │   │   │
-│   │   │   └── drawable/
-│   │   │
-│   │   └── assets/
-│   │       └── models/
-│   │           ├── onnx/
-│   │           │   ├── yolo.onnx
-│   │           │   └── padim.onnx
-│   │           │
-│   │           └── tflite/
-│   │               └── mobilenet.tflite
-│   │
-│   └── test/
-└── build.gradle
-```
-
-Next Steps Implementation Order:
-
-1. First, let's implement the ONNX Executor:
-
 ```kotlin
-// executor/onnx/OnnxExecutor.kt
-class OnnxExecutor @Inject constructor(
-    private val context: Context,
-    private val performanceMonitor: PerformanceMonitor
-) : ModelExecutor {
-    private var session: OrtSession? = null
-    private val environment = OrtEnvironment.getEnvironment()
-    private var gpuDelegate: GpuDelegate? = null
-
-    override fun loadModel(config: ModelConfig) {
-        if (isInitialized) return
-
-        val options = SessionOptions().apply {
-            setIntraOpNumThreads(config.deviceConfig.numThreads)
-            setInterOpNumThreads(config.deviceConfig.numThreads)
-            setOptimizationLevel(GraphOptimizationLevel.ORT_ENABLE_ALL)
-
-            if (config.deviceConfig.useGpu) {
-                gpuDelegate = config.deviceConfig.gpuDelegate
-                addGPU(GPUConfig(gpuDelegate!!))
-            }
-        }
-
-        val modelBytes = context.assets.open(config.modelPath).use { it.readBytes() }
-        session = environment.createSession(modelBytes, options)
-    }
-
-    override fun unloadModel() {
-        session?.close()
-        session = null
-        gpuDelegate?.close()
-        gpuDelegate = null
-    }
-
-    override suspend fun execute(input: ProcessedData): RawOutput =
-        withContext(Dispatchers.Default) {
-            checkNotNull(session) { "Session not initialized" }
-
-            val inputTensor = OnnxTensor.createTensor(
-                environment,
-                input.tensorData,
-                input.shape.toLongArray()
-            )
-
-            val startTime = System.nanoTime()
-            val output = session!!.run(
-                mapOf("input" to inputTensor),
-                setOf("output")
-            )
-            val inferenceTime = (System.nanoTime() - startTime) / 1_000_000
-
-            performanceMonitor.recordMetric(
-                "inference_time",
-                inferenceTime,
-                MetricType.INFERENCE
-            )
-
-            val outputTensor = output[0]
-            val outputData = outputTensor.value as Array<*>
-
-            RawOutput.ObjectDetection(
-                data = outputData.map { (it as FloatArray)[0] }.toFloatArray(),
-                shape = input.shape
-            )
-        }
-
-    override val isInitialized: Boolean
-        get() = session != null
+// detection/anomaly/AnomalyDetector.kt
+interface AnomalyDetector {
+    suspend fun detect(input: DetectionInput): DetectionResult
+    fun release()
 }
 
-// executor/onnx/OnnxUtils.kt
-object OnnxUtils {
-    fun createInputTensor(
-        environment: OrtEnvironment,
-        data: FloatArray,
-        shape: Array<Int>
-    ): OnnxTensor {
-        return OnnxTensor.createTensor(
-            environment,
-            data,
-            shape.map { it.toLong() }.toLongArray()
-        )
-    }
-
-    fun processOutput(tensor: OrtValue): FloatArray {
-        return when (val value = tensor.value) {
-            is Array<*> -> value.map { (it as FloatArray)[0] }.toFloatArray()
-            is FloatArray -> value
-            else -> throw IllegalArgumentException("Unsupported output type")
-        }
-    }
-}
-
-```
-
-2. Next, let's implement the YOLO Detector:
-
-```kotlin
-// detection/object/models/YoloDetector.kt
-class YoloDetector @Inject constructor(
+// detection/anomaly/models/PadimDetector.kt
+class PadimDetector @Inject constructor(
     private val executor: ModelExecutor,
-    private val processor: YoloProcessor,
+    private val processor: PadimProcessor,
     private val performanceMonitor: PerformanceMonitor
-) : ObjectDetector {
-
+) : AnomalyDetector {
     private val config = ModelConfig(
-        modelPath = "models/yolo.onnx",
-        inputShape = arrayOf(1, 3, 640, 640),
-        outputShape = arrayOf(1, 85, 8400),
+        modelPath = "models/padim.onnx",
+        inputShape = arrayOf(1, 3, 224, 224),
+        outputShape = arrayOf(1, 1, 224, 224),
         framework = Framework.ONNX,
         deviceConfig = DeviceConfig(useGpu = true)
     )
@@ -249,26 +25,22 @@ class YoloDetector @Inject constructor(
 
     override suspend fun detect(input: DetectionInput): DetectionResult {
         val startTime = System.nanoTime()
-        
-        return try {
-            // Preprocess
+        try {
             val processed = processor.preprocess(input)
             val preprocessTime = (System.nanoTime() - startTime) / 1_000_000
 
-            // Run inference
             val output = executor.execute(processed)
             val inferenceTime = (System.nanoTime() - startTime) / 1_000_000 - preprocessTime
 
-            // Postprocess
             val postprocessStart = System.nanoTime()
             val result = processor.postprocess(output, ProcessingConfig(
-                targetSize = Size(640, 640),
-                normalizationType = NormalizationType.ZERO_TO_ONE
+                targetSize = Size(224, 224),
+                normalizationType = NormalizationType.NEGATIVE_ONE_TO_ONE
             ))
             val postprocessTime = (System.nanoTime() - postprocessStart) / 1_000_000
 
-            when (result) {
-                is DetectionResult.ObjectDetection -> result.copy(
+            return when (result) {
+                is DetectionResult.AnomalyDetection -> result.copy(
                     metrics = ProcessingMetrics(
                         preprocessTime = preprocessTime,
                         inferenceTime = inferenceTime,
@@ -277,11 +49,11 @@ class YoloDetector @Inject constructor(
                 )
                 else -> DetectionResult.Error(
                     Exception("Invalid result type"),
-                    "Expected object detection result"
+                    "Expected anomaly detection result"
                 )
             }
         } catch (e: Exception) {
-            DetectionResult.Error(e, "Detection failed: ${e.message}")
+            return DetectionResult.Error(e, "Anomaly detection failed: ${e.message}")
         }
     }
 
@@ -290,12 +62,239 @@ class YoloDetector @Inject constructor(
     }
 }
 
+// detection/anomaly/models/PatchCoreDetector.kt
+class PatchCoreDetector @Inject constructor(
+    private val executor: ModelExecutor,
+    private val processor: PatchCoreProcessor,
+    private val performanceMonitor: PerformanceMonitor
+) : AnomalyDetector {
+    private val config = ModelConfig(
+        modelPath = "models/patchcore.onnx",
+        inputShape = arrayOf(1, 3, 224, 224),
+        outputShape = arrayOf(1, 1, 224, 224),
+        framework = Framework.ONNX,
+        deviceConfig = DeviceConfig(useGpu = true)
+    )
+
+    init {
+        executor.loadModel(config)
+    }
+
+    override suspend fun detect(input: DetectionInput): DetectionResult {
+        val startTime = System.nanoTime()
+        try {
+            val processed = processor.preprocess(input)
+            val preprocessTime = (System.nanoTime() - startTime) / 1_000_000
+
+            val output = executor.execute(processed)
+            val inferenceTime = (System.nanoTime() - startTime) / 1_000_000 - preprocessTime
+
+            val postprocessStart = System.nanoTime()
+            val result = processor.postprocess(output, ProcessingConfig(
+                targetSize = Size(224, 224),
+                normalizationType = NormalizationType.NEGATIVE_ONE_TO_ONE
+            ))
+            val postprocessTime = (System.nanoTime() - postprocessStart) / 1_000_000
+
+            return when (result) {
+                is DetectionResult.AnomalyDetection -> result.copy(
+                    metrics = ProcessingMetrics(
+                        preprocessTime = preprocessTime,
+                        inferenceTime = inferenceTime,
+                        postprocessTime = postprocessTime
+                    )
+                )
+                else -> DetectionResult.Error(
+                    Exception("Invalid result type"),
+                    "Expected anomaly detection result"
+                )
+            }
+        } catch (e: Exception) {
+            return DetectionResult.Error(e, "Anomaly detection failed: ${e.message}")
+        }
+    }
+
+    override fun release() {
+        executor.unloadModel()
+    }
+}
+
+// detection/anomaly/processor/PadimProcessor.kt
+class PadimProcessor @Inject constructor(
+    private val imageProcessor: ImageProcessor
+) : BaseProcessor {
+    override suspend fun preprocess(input: DetectionInput): ProcessedData {
+        return withContext(Dispatchers.Default) {
+            val bitmap = when (input) {
+                is DetectionInput.FromBitmap -> input.bitmap
+                is DetectionInput.FromUri -> imageProcessor.loadBitmapFromUri(input.uri)
+                is DetectionInput.FromByteArray -> imageProcessor.loadBitmapFromByteArray(input.data)
+            }
+
+            val resized = imageProcessor.resizeBitmap(
+                bitmap,
+                Size(224, 224)
+            )
+
+            val tensorData = FloatArray(resized.width * resized.height * 3)
+            processPixels(resized, tensorData)
+
+            ProcessedData(
+                tensorData = tensorData,
+                shape = arrayOf(1, 3, 224, 224),
+                originalSize = Size(bitmap.width, bitmap.height),
+                preprocessingInfo = PreprocessingInfo(
+                    scaleFactor = 224f / bitmap.width,
+                    padding = Padding(0, 0, 0, 0)
+                )
+            )
+        }
+    }
+
+    override suspend fun postprocess(output: RawOutput, config: ProcessingConfig): DetectionResult {
+        return withContext(Dispatchers.Default) {
+            when (output) {
+                is RawOutput.AnomalyDetection -> {
+                    val anomalyMap = processAnomalyMap(
+                        output.data,
+                        output.shape
+                    )
+                    DetectionResult.AnomalyDetection(
+                        anomalies = findAnomalies(anomalyMap),
+                        metrics = ProcessingMetrics(0, 0, 0)
+                    )
+                }
+                else -> DetectionResult.Error(
+                    Exception("Invalid output type"),
+                    "Expected anomaly detection output"
+                )
+            }
+        }
+    }
+
+    private fun processPixels(bitmap: Bitmap, output: FloatArray) {
+        val pixels = IntArray(bitmap.width * bitmap.height)
+        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+        
+        for (i in pixels.indices) {
+            val pixel = pixels[i]
+            output[i] = NormalizationType.NEGATIVE_ONE_TO_ONE.normalize(Color.red(pixel).toFloat())
+            output[i + pixels.size] = NormalizationType.NEGATIVE_ONE_TO_ONE.normalize(Color.green(pixel).toFloat())
+            output[i + 2 * pixels.size] = NormalizationType.NEGATIVE_ONE_TO_ONE.normalize(Color.blue(pixel).toFloat())
+        }
+    }
+
+    private fun processAnomalyMap(data: FloatArray, shape: Array<Int>): Array<FloatArray> {
+        val height = shape[2]
+        val width = shape[3]
+        return Array(height) { y ->
+            FloatArray(width) { x ->
+                data[y * width + x]
+            }
+        }
+    }
+
+    private fun findAnomalies(anomalyMap: Array<FloatArray>): List<Anomaly> {
+        val anomalies = mutableListOf<Anomaly>()
+        val threshold = 0.5f // Adjust based on your needs
+        
+        for (y in anomalyMap.indices) {
+            for (x in anomalyMap[y].indices) {
+                if (anomalyMap[y][x] > threshold) {
+                    anomalies.add(Anomaly(
+                        region = RectF(x.toFloat(), y.toFloat(), (x+1).toFloat(), (y+1).toFloat()),
+                        score = anomalyMap[y][x]
+                    ))
+                }
+            }
+        }
+        
+        return anomalies
+    }
+}
+
+// detection/anomaly/processor/PatchCoreProcessor.kt
+class PatchCoreProcessor @Inject constructor(
+    private val imageProcessor: ImageProcessor
+) : BaseProcessor {
+    override suspend fun preprocess(input: DetectionInput): ProcessedData {
+        return withContext(Dispatchers.Default) {
+            val bitmap = when (input) {
+                is DetectionInput.FromBitmap -> input.bitmap
+                is DetectionInput.FromUri -> imageProcessor.loadBitmapFromUri(input.uri)
+                is DetectionInput.FromByteArray -> imageProcessor.loadBitmapFromByteArray(input.data)
+            }
+
+            val resized = imageProcessor.resizeBitmap(
+                bitmap,
+                Size(224, 224)
+            )
+
+            val tensorData = FloatArray(resized.width * resized.height * 3)
+            processPixels(resized, tensorData)
+
+            ProcessedData(
+                tensorData = tensorData,
+                shape = arrayOf(1, 3, 224, 224),
+                originalSize = Size(bitmap.width, bitmap.height),
+                preprocessingInfo = PreprocessingInfo(
+                    scaleFactor = 224f / bitmap.width,
+                    padding = Padding(0, 0, 0, 0)
+                )
+            )
+        }
+    }
+
+    override suspend fun postprocess(output: RawOutput, config: ProcessingConfig): DetectionResult {
+        return withContext(Dispatchers.Default) {
+            when (output) {
+                is RawOutput.AnomalyDetection -> {
+                    val anomalyScores = processAnomalyScores(
+                        output.data,
+                        output.shape
+                    )
+                    DetectionResult.AnomalyDetection(
+                        anomalies = detectAnomalies(anomalyScores),
+                        metrics = ProcessingMetrics(0, 0, 0)
+                    )
+                }
+                else -> DetectionResult.Error(
+                    Exception("Invalid output type"),
+                    "Expected anomaly detection output"
+                )
+            }
+        }
+    }
+
+    private fun processPixels(bitmap: Bitmap, output: FloatArray) {
+        val pixels = IntArray(bitmap.width * bitmap.height)
+        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+        
+        for (i in pixels.indices) {
+            val pixel = pixels[i]
+            output[i] = NormalizationType.NEGATIVE_ONE_TO_ONE.normalize(Color.red(pixel).toFloat())
+            output[i + pixels.size] = NormalizationType.NEGATIVE_ONE_TO_ONE.normalize(Color.green(pixel).toFloat())
+            output[i + 2 * pixels.size] = NormalizationType.NEGATIVE_ONE_TO_ONE.normalize(Color.blue(pixel).toFloat())
+        }
+    }
+
+    private fun processAnomalyScores(data: FloatArray, shape: Array<Int>): List<Float> {
+        return data.toList()
+    }
+
+    private fun detectAnomalies(scores: List<Float>): List<Anomaly> {
+        val threshold = 0.5f // Adjust based on your needs
+        return scores.mapIndexedNotNull { index, score ->
+            if (score > threshold) {
+                Anomaly(
+                    region = RectF(0f, 0f, 1f, 1f), // Normalized coordinates
+                    score = score
+                )
+            } else null
+        }
+    }
+}
+
 ```
 
-Would you like me to continue with:
-1. YOLO Processor implementation
-2. TFLite Executor implementation
-3. MobileNet Detector implementation
-4. UI components implementation
-
-Let me know which part you'd like to see next!
+Would you like the implementation of other components or specific parts?
