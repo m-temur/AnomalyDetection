@@ -1,54 +1,108 @@
-Let me provide both the BaseProcessor for anomaly and fix the ModelExecutor issue:
+Here's the ImageProcessor implementation that's needed:
 
 ```kotlin
-// detection/anomaly/base/AnomalyBaseProcessor.kt
-interface AnomalyBaseProcessor {
-    suspend fun preprocess(input: DetectionInput): ProcessedData
-    suspend fun postprocess(output: RawOutput, config: ProcessingConfig): DetectionResult
-    fun calculateAnomalyScore(features: FloatArray): Float
-    fun generateAnomalyMask(scores: FloatArray, width: Int, height: Int): Bitmap?
+// utils/image/ImageProcessor.kt
+class ImageProcessor @Inject constructor(
+    private val context: Context,
+    private val bitmapPool: BitmapPool
+) {
+    suspend fun loadBitmapFromUri(uri: Uri): Bitmap = withContext(Dispatchers.IO) {
+        context.contentResolver.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it)
+        } ?: throw IllegalStateException("Failed to load bitmap from URI")
+    }
+
+    fun loadBitmapFromByteArray(data: ByteArray): Bitmap {
+        return BitmapFactory.decodeByteArray(data, 0, data.size)
+    }
+
+    fun resizeBitmap(bitmap: Bitmap, targetSize: Size): Bitmap {
+        if (bitmap.width == targetSize.width && bitmap.height == targetSize.height) {
+            return bitmap
+        }
+
+        return Bitmap.createScaledBitmap(
+            bitmap,
+            targetSize.width,
+            targetSize.height,
+            true
+        )
+    }
+
+    fun rotateBitmap(bitmap: Bitmap, rotation: Int): Bitmap {
+        if (rotation == 0) return bitmap
+
+        val matrix = Matrix().apply {
+            postRotate(rotation.toFloat())
+        }
+
+        return Bitmap.createBitmap(
+            bitmap,
+            0,
+            0,
+            bitmap.width,
+            bitmap.height,
+            matrix,
+            true
+        )
+    }
+
+    fun normalizePixel(value: Int, mean: Float = 127.5f, std: Float = 127.5f): Float {
+        return (value - mean) / std
+    }
+
+    fun preprocessForInference(bitmap: Bitmap, config: ProcessingConfig): FloatArray {
+        val pixels = IntArray(bitmap.width * bitmap.height)
+        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+        
+        val tensorData = FloatArray(bitmap.width * bitmap.height * 3)
+        for (i in pixels.indices) {
+            val pixel = pixels[i]
+            tensorData[i] = normalizePixel(Color.red(pixel))
+            tensorData[i + pixels.size] = normalizePixel(Color.green(pixel))
+            tensorData[i + 2 * pixels.size] = normalizePixel(Color.blue(pixel))
+        }
+        return tensorData
+    }
+
+    fun convertBitmapToByteBuffer(bitmap: Bitmap, config: ProcessingConfig): ByteBuffer {
+        val byteBuffer = ByteBuffer.allocateDirect(
+            4 * bitmap.width * bitmap.height * 3
+        ).apply {
+            order(ByteOrder.nativeOrder())
+        }
+
+        val pixels = IntArray(bitmap.width * bitmap.height)
+        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+
+        pixels.forEach { pixel ->
+            byteBuffer.putFloat(normalizePixel(Color.red(pixel)))
+            byteBuffer.putFloat(normalizePixel(Color.green(pixel)))
+            byteBuffer.putFloat(normalizePixel(Color.blue(pixel)))
+        }
+
+        return byteBuffer
+    }
 }
 
-// detection/anomaly/base/AnomalyProcessingConfig.kt
-data class AnomalyProcessingConfig(
-    val threshold: Float = 0.5f,
-    val maskGenerationEnabled: Boolean = true,
-    val featureAggregation: FeatureAggregationType = FeatureAggregationType.MEAN
-)
-
-enum class FeatureAggregationType {
-    MEAN,
-    MAX,
-    WEIGHTED
-}
-
-```
-
-For the ModelExecutor error, here's the interface and implementation:
-
-```kotlin
-// executor/base/ModelExecutor.kt
-interface ModelExecutor {
-    fun loadModel(config: ModelConfig)
-    fun unloadModel()
-    suspend fun execute(input: ProcessedData): RawOutput
-    val isInitialized: Boolean
-}
-
-// Add this to your di/ExecutorModule.kt
+// di/ProcessingModule.kt
 @Module
 @InstallIn(SingletonComponent::class)
-object ExecutorModule {
+object ProcessingModule {
     @Provides
     @Singleton
-    fun provideModelExecutor(
+    fun provideImageProcessor(
         @ApplicationContext context: Context,
-        performanceMonitor: PerformanceMonitor
-    ): ModelExecutor {
-        return OnnxExecutor(context, performanceMonitor)
+        bitmapPool: BitmapPool
+    ): ImageProcessor {
+        return ImageProcessor(context, bitmapPool)
+    }
+    
+    @Provides
+    @Singleton
+    fun provideBitmapPool(): BitmapPool {
+        return BitmapPool()
     }
 }
 
 ```
-
-Update your AnomalyDetector implementations to use these new components.
