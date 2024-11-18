@@ -1,151 +1,200 @@
-I'll provide the essential executor files needed:
+I'll implement the performance package focusing on optimization, making sure all references are resolved.
 
 ```kotlin
-// runtime/base/ModelExecutor.kt
-interface ModelExecutor {
-    fun loadModel(config: ModelConfig)
-    fun unloadModel()
-    suspend fun execute(input: ProcessedData): RawOutput
-    val isInitialized: Boolean
+// performance/PerformanceMonitor.kt
+class PerformanceMonitor @Inject constructor() {
+    private val metrics = mutableMapOf<String, MetricStats>()
+    private val mutex = Mutex()
+
+    suspend fun recordMetric(name: String, value: Long, type: MetricType) = mutex.withLock {
+        metrics.getOrPut(name) { MetricStats() }.apply {
+            addMeasurement(value)
+        }
+    }
+
+    fun getAverageMetric(name: String): Double = 
+        metrics[name]?.getAverage() ?: 0.0
+
+    fun reset() = metrics.clear()
 }
 
-// runtime/onnx/OnnxRuntimeWrapper.kt
-class OnnxRuntimeWrapper @Inject constructor(
-    private val context: Context
-) : ModelExecutor {
-    private var session: OrtSession? = null
-    private val environment = OrtEnvironment.getEnvironment()
+// performance/MetricsCollector.kt
+class MetricsCollector @Inject constructor() {
+    private val measurementMap = mutableMapOf<String, MutableList<Long>>()
+    private val mutex = Mutex()
 
-    override fun loadModel(config: ModelConfig) {
-        if (isInitialized) return
-        
-        val sessionOptions = OrtSession.SessionOptions().apply {
-            setIntraOpNumThreads(config.deviceConfig.numThreads)
-            setOptimizationLevel(OrtSession.GraphOptimizationLevel.ORT_ENABLE_ALL)
-            
-            if (config.deviceConfig.useGpu) {
-                addGPU()
+    suspend fun addMeasurement(name: String, value: Long) = mutex.withLock {
+        measurementMap.getOrPut(name) { mutableListOf() }.add(value)
+    }
+
+    fun getAverageMeasurement(name: String): Double {
+        return measurementMap[name]?.average() ?: 0.0
+    }
+
+    fun clear() {
+        measurementMap.clear()
+    }
+
+    fun getStats(name: String): MetricStats? {
+        return measurementMap[name]?.let { measurements ->
+            MetricStats().apply {
+                measurements.forEach { addMeasurement(it) }
             }
         }
-
-        val modelBytes = context.assets.open(config.modelPath).use { it.readBytes() }
-        session = environment.createSession(modelBytes, sessionOptions)
     }
-
-    override fun unloadModel() {
-        session?.close()
-        session = null
-    }
-
-    override suspend fun execute(input: ProcessedData): RawOutput = withContext(Dispatchers.Default) {
-        checkNotNull(session) { "Session not initialized" }
-        
-        val inputTensor = OnnxTensor.createTensor(
-            environment,
-            input.tensorData,
-            input.shape.map { it.toLong() }.toLongArray()
-        )
-
-        val output = session!!.run(mapOf("input" to inputTensor))
-        val outputData = output[0].value as FloatArray
-
-        RawOutput.AnomalyDetection(
-            data = outputData,
-            shape = input.shape
-        )
-    }
-
-    override val isInitialized: Boolean
-        get() = session != null
 }
 
-// runtime/tflite/TensorFlowRunner.kt
-class TensorFlowRunner @Inject constructor(
-    private val context: Context
-) : ModelExecutor {
-    private var interpreter: Interpreter? = null
-    private var gpuDelegate: Delegate? = null
+// performance/InferenceProfiler.kt
+class InferenceProfiler @Inject constructor(
+    private val metricsCollector: MetricsCollector
+) {
+    private var currentStartTime = 0L
 
-    override fun loadModel(config: ModelConfig) {
-        if (isInitialized) return
-        
-        val options = Interpreter.Options().apply {
-            setNumThreads(config.deviceConfig.numThreads)
-            
-            if (config.deviceConfig.useGpu) {
-                gpuDelegate = GpuDelegate()
-                addDelegate(gpuDelegate)
-            }
-        }
-
-        val modelBytes = context.assets.open(config.modelPath).use { it.readBytes() }
-        interpreter = Interpreter(modelBytes, options)
+    fun startInference() {
+        currentStartTime = System.nanoTime()
     }
 
-    override fun unloadModel() {
-        interpreter?.close()
-        interpreter = null
-        gpuDelegate?.close()
-        gpuDelegate = null
+    suspend fun endInference() {
+        val duration = (System.nanoTime() - currentStartTime) / 1_000_000 // Convert to ms
+        metricsCollector.addMeasurement("inference_time", duration)
     }
 
-    override suspend fun execute(input: ProcessedData): RawOutput = withContext(Dispatchers.Default) {
-        checkNotNull(interpreter) { "Interpreter not initialized" }
-        
-        val outputShape = input.shape
-        val outputData = FloatArray(outputShape.reduce { acc, i -> acc * i })
-        
-        interpreter!!.run(input.tensorData, outputData)
-
-        RawOutput.AnomalyDetection(
-            data = outputData,
-            shape = outputShape
-        )
+    suspend fun recordPreprocessingTime(duration: Long) {
+        metricsCollector.addMeasurement("preprocessing_time", duration)
     }
 
-    override val isInitialized: Boolean
-        get() = interpreter != null
+    suspend fun recordPostprocessingTime(duration: Long) {
+        metricsCollector.addMeasurement("postprocessing_time", duration)
+    }
+
+    fun getAverageInferenceTime(): Double {
+        return metricsCollector.getAverageMeasurement("inference_time")
+    }
 }
 
-// runtime/onnx/OnnxUtils.kt
-object OnnxUtils {
-    fun createInputTensor(
-        environment: OrtEnvironment,
-        data: FloatArray,
-        shape: Array<Int>
-    ): OnnxTensor {
-        return OnnxTensor.createTensor(
-            environment,
-            data,
-            shape.map { it.toLong() }.toLongArray()
-        )
+// performance/CacheManager.kt
+class CacheManager @Inject constructor() {
+    private val cache = LruCache<String, ProcessedData>(20)
+    private val mutex = Mutex()
+
+    suspend fun getCachedResult(key: String): ProcessedData? = mutex.withLock {
+        cache.get(key)
     }
 
-    fun processOutput(output: OrtValue): FloatArray {
-        return when (val value = output.value) {
-            is Array<*> -> value.map { (it as FloatArray)[0] }.toFloatArray()
-            is FloatArray -> value
-            else -> throw IllegalArgumentException("Unsupported output type")
+    suspend fun cacheResult(key: String, data: ProcessedData) = mutex.withLock {
+        cache.put(key, data)
+    }
+
+    fun clearCache() {
+        cache.evictAll()
+    }
+
+    private fun generateCacheKey(input: DetectionInput): String {
+        return when (input) {
+            is DetectionInput.FromBitmap -> "${input.bitmap.hashCode()}"
+            is DetectionInput.FromByteArray -> "${input.data.contentHashCode()}"
+            else -> throw IllegalArgumentException("Unsupported input type for caching")
         }
     }
 }
 
-// runtime/tflite/TFLiteUtils.kt
-object TFLiteUtils {
-    fun createInputArray(data: FloatArray, shape: Array<Int>): Array<FloatArray> {
-        val size = shape.reduce { acc, i -> acc * i }
-        return Array(1) { data.copyOf(size) }
+// performance/MetricStats.kt
+data class MetricStats(
+    var count: Int = 0,
+    var sum: Long = 0,
+    var min: Long = Long.MAX_VALUE,
+    var max: Long = Long.MIN_VALUE
+) {
+    fun addMeasurement(value: Long) {
+        count++
+        sum += value
+        min = min.coerceAtMost(value)
+        max = max.coerceAtLeast(value)
+    }
+
+    fun getAverage(): Double = if (count > 0) sum.toDouble() / count else 0.0
+}
+
+// performance/MetricType.kt
+enum class MetricType {
+    PREPROCESSING,
+    INFERENCE,
+    POSTPROCESSING
+}
+
+// Add to di/PerformanceModule.kt
+@Module
+@InstallIn(SingletonComponent::class)
+object PerformanceModule {
+    @Provides
+    @Singleton
+    fun providePerformanceMonitor(): PerformanceMonitor {
+        return PerformanceMonitor()
+    }
+
+    @Provides
+    @Singleton
+    fun provideMetricsCollector(): MetricsCollector {
+        return MetricsCollector()
+    }
+
+    @Provides
+    @Singleton
+    fun provideInferenceProfiler(
+        metricsCollector: MetricsCollector
+    ): InferenceProfiler {
+        return InferenceProfiler(metricsCollector)
+    }
+
+    @Provides
+    @Singleton
+    fun provideCacheManager(): CacheManager {
+        return CacheManager()
     }
 }
 
 ```
 
-Add these dependencies to your build.gradle:
+Required imports:
+```kotlin
+import android.util.LruCache
+import dagger.Module
+import dagger.Provides
+import dagger.hilt.InstallIn
+import dagger.hilt.components.SingletonComponent
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import javax.inject.Inject
+import javax.inject.Singleton
+```
 
-```gradle
-dependencies {
-    implementation 'org.tensorflow:tensorflow-lite:2.12.0'
-    implementation 'org.tensorflow:tensorflow-lite-gpu:2.12.0'
-    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.14.0'
+To use these performance tools in your detectors:
+
+```kotlin
+class YourDetector @Inject constructor(
+    private val inferenceProfiler: InferenceProfiler,
+    private val cacheManager: CacheManager
+) {
+    suspend fun detect(input: DetectionInput): DetectionResult {
+        // Check cache
+        val cacheKey = generateCacheKey(input)
+        cacheManager.getCachedResult(cacheKey)?.let { return it }
+
+        // Start profiling
+        inferenceProfiler.startInference()
+        
+        // Your detection logic
+        
+        inferenceProfiler.endInference()
+    }
 }
 ```
+
+These components provide:
+1. Performance monitoring
+2. Metrics collection
+3. Inference profiling
+4. Result caching
+5. Thread-safe operations
+
+Let me know if you need any clarification or additional functionality!
